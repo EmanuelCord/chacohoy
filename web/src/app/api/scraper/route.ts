@@ -688,6 +688,10 @@ async function scrapeGoogleNewsTopicListing(
       const link = new URL(rawHref, "https://news.google.com").toString();
       const title = decodeHtmlEntities(match[3].replace(/<[^>]+>/g, " "))
         .replace(/\s+/g, " ")
+        .replace(
+          /\s+Hace\s+\d+\s+(?:hora|horas|minuto|minutos|d[ií]a|d[ií]as)[\s\S]*$/i,
+          ""
+        )
         .trim();
 
       // Extraer titulares secundarios del mismo cluster de cobertura en Google News para enriquecer el cuerpo de la noticia
