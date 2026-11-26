@@ -113,8 +113,12 @@ function stripExternalMediaNames(text: string): string {
   return decodeHtmlEntities(text)
     .replace(/Ver m[aá]s t[ií]tulos y perspectivas[\s\S]*$/gi, "")
     .replace(/chevron_right/gi, "")
+    .replace(/\bEn di[aá]logo con Letra P\b/gi, "En declaraciones periodísticas")
+    .replace(/\bseg[uú]n supo Letra P\b/gi, "según pudo saber este medio")
+    .replace(/\bpudo reconstruir Letra P\b/gi, "se pudo reconstruir")
+    .replace(/\bLetra P\b/gi, "este medio")
     .replace(
-      /\s+-\s+(?:Infobae|Clar[ií]n(?:\.com)?|La Naci[oó]n|Ámbito|Ambito(?:\.com)?|P[aá]gina\s*\/?\s*12|P[aá]gina\|12|Letra P|Perfil|TN|Todo Noticias|El Cronista|Cronista|DW(?:\.com)?|3DJuegos|La Pol[ií]tica Online|Rosario3|La Voz|MDZ Online|BAE Negocios|El Destape| Agencia EFE|Reuters)\b.*$/gi,
+      /\s+-\s+(?:Infobae|Clar[ií]n(?:\.com)?|La Naci[oó]n|Ámbito|Ambito(?:\.com)?|P[aá]gina\s*\/?\s*12|P[aá]gina\|12|Letra P|Perfil|TN|Todo Noticias|El Cronista|Cronista|DW(?:\.com)?|3DJuegos|La Pol[ií]tica Online|Rosario3|La Voz|MDZ Online|BAE Negocios|El Destape|Agencia EFE|Reuters)\b.*$/gi,
       ""
     )
     .replace(
@@ -514,17 +518,39 @@ async function scrapeArticlePage(articleUrl: string): Promise<{
         }
       }
     } else {
+      const cleanedHtml = html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+        .replace(/<header[\s\S]*?<\/header>/gi, " ")
+        .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+        .replace(/<aside[\s\S]*?<\/aside>/gi, " ");
+
       const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
       let pMatch: RegExpExecArray | null;
-      while ((pMatch = pRegex.exec(html)) !== null && paragraphs.length < 18) {
-        const cleanP = decodeHtmlEntities(pMatch[1].replace(/<[^>]+>/g, " "))
-          .replace(/\s+/g, " ")
-          .trim();
+      while (
+        (pMatch = pRegex.exec(cleanedHtml)) !== null &&
+        paragraphs.length < 18
+      ) {
+        const cleanP = stripExternalMediaNames(
+          decodeHtmlEntities(pMatch[1].replace(/<[^>]+>/g, " "))
+        );
+        const lowerP = cleanP.toLowerCase();
         if (
-          cleanP.length > 55 &&
-          !cleanP.toLowerCase().includes("cookies") &&
-          !cleanP.toLowerCase().includes("todos los derechos reservados") &&
-          !cleanP.toLowerCase().includes("suscribite")
+          cleanP.length > 60 &&
+          !lowerP.includes("outdated browser") &&
+          !lowerP.includes("upgrade your browser") &&
+          !lowerP.includes("queryselector") &&
+          !lowerP.includes("window._") &&
+          !lowerP.includes("function(") &&
+          !lowerP.includes("const ") &&
+          !lowerP.includes("temas del día") &&
+          !lowerP.includes("norte grande centro patagonia") &&
+          !lowerP.includes("podés elegir") &&
+          !lowerP.includes("agregar este medio") &&
+          !lowerP.includes("cookies") &&
+          !lowerP.includes("todos los derechos reservados") &&
+          !lowerP.includes("suscribite")
         ) {
           paragraphs.push(cleanP);
         }
@@ -683,7 +709,7 @@ async function scrapeGoogleNewsTopicListing(
 
     const html = await res.text();
     const cardRegex =
-      /<figure[^>]+class=["'][^"']*K0q4G[^"']*["'][^>]*>\s*<img[^>]+src=["'](\/api\/attachments\/[^"']+)["'][^>]*>\s*<\/figure>[\s\S]{1,2200}?<a[^>]+class=["']gPFEn["'][^>]+href=["']([^"']+)["'][^>]*>([^<]+)<\/a>([\s\S]{0,1800}?)(?=<figure[^>]+class=["'][^"']*K0q4G|$)/gi;
+      /<figure[^>]+class=["'][^"']*K0q4G[^"']*["'][^>]*>\s*<img[^>]+src=["'](\/api\/attachments\/[^"']+)["'][^>]*>\s*<\/figure>[\s\S]{1,3800}?<a[^>]+class=["']gPFEn["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
 
     let match: RegExpExecArray | null;
     while ((match = cardRegex.exec(html)) !== null && results.length < 5) {
@@ -697,30 +723,13 @@ async function scrapeGoogleNewsTopicListing(
       const rawHref = decodeHtmlEntities(match[2]).replace(/^\.\//, "/");
       const link = new URL(rawHref, "https://news.google.com").toString();
       const title = stripExternalMediaNames(
-        decodeHtmlEntities(match[3])
+        decodeHtmlEntities(match[3].replace(/<[^>]+>/g, " "))
           .replace(
             /\s+Hace\s+\d+\s+(?:hora|horas|minuto|minutos|d[ií]a|d[ií]as)[\s\S]*$/i,
             ""
           )
           .trim()
       );
-
-      // Extraer titulares secundarios limpios del mismo cluster de cobertura
-      const clusterTail = match[4] || "";
-      const relatedHeadlines: string[] = [];
-      const relRegex = /<a[^>]+class=["']gPFEn["'][^>]*>([^<]+)<\/a>/gi;
-      let relMatch: RegExpExecArray | null;
-      while (
-        (relMatch = relRegex.exec(clusterTail)) !== null &&
-        relatedHeadlines.length < 3
-      ) {
-        const relTitle = stripExternalMediaNames(
-          decodeHtmlEntities(relMatch[1]).trim()
-        );
-        if (relTitle && relTitle.length > 20 && relTitle !== title) {
-          relatedHeadlines.push(relTitle);
-        }
-      }
 
       if (
         title &&
@@ -732,7 +741,6 @@ async function scrapeGoogleNewsTopicListing(
           title,
           link,
           imageUrl,
-          relatedHeadlines,
         });
       }
     }
@@ -942,18 +950,21 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Limpiar o actualizar cualquier noticia existente que tuviera texto corto, restos de cluster o entidades HTML sin decodificar
+  // Limpiar o actualizar cualquier noticia existente que tuviera texto sucio
   const prevNoticias = await getNoticias();
   for (const prev of prevNoticias) {
     if (
       prev.contenido_html.includes("Fuente original:") ||
       prev.contenido_html.includes("chevron_right") ||
       prev.contenido_html.includes("Ver más títulos") ||
+      prev.contenido_html.includes("outdated browser") ||
+      prev.contenido_html.includes("querySelector") ||
+      prev.contenido_html.includes("Letra P") ||
       prev.contenido_html.includes("&#") ||
+      prev.bajada.includes("outdated browser") ||
       prev.bajada.includes("&#") ||
       prev.bajada.includes("a través de") ||
-      prev.contenido_html.length < 320 ||
-      (prev.fuente_url && prev.fuente_url.includes("news.google.com"))
+      prev.contenido_html.length < 320
     ) {
       await deleteNoticia(prev.id);
     }
