@@ -56,7 +56,7 @@ function isIgnoredImage(url: string): boolean {
  * Extrae título, volanta, texto completo y la IMAGEN REAL EXACTA
  * desde una URL de noticia (compatible con chaco.gob.ar, letrap.com.ar y cualquier diario digital).
  */
-export async function scrapeArticlePage(articleUrl: string): Promise<{
+async function scrapeArticlePage(articleUrl: string): Promise<{
   title?: string;
   volanta?: string;
   description?: string;
@@ -246,7 +246,7 @@ export async function scrapeArticlePage(articleUrl: string): Promise<{
   }
 }
 
-export interface ListedNewsCard {
+interface ListedNewsCard {
   title: string;
   link: string;
   imageUrl: string;
@@ -257,7 +257,7 @@ export interface ListedNewsCard {
 /**
  * 1. Scraper de chaco.gob.ar/noticias
  */
-export async function scrapeChacoGobListing(
+async function scrapeChacoGobListing(
   portalUrl: string
 ): Promise<ListedNewsCard[]> {
   const results: ListedNewsCard[] = [];
@@ -311,7 +311,7 @@ export async function scrapeChacoGobListing(
 /**
  * 2. Scraper de Letra P (https://www.letrap.com.ar/) con sus fotos reales de alta resolución
  */
-export async function scrapeLetraPListing(
+async function scrapeLetraPListing(
   portalUrl: string
 ): Promise<ListedNewsCard[]> {
   const results: ListedNewsCard[] = [];
@@ -383,7 +383,7 @@ export async function scrapeLetraPListing(
  * 3. Scraper de páginas de Tópicos de Google News (https://news.google.com/topics/CAAq...)
  * Extrae las noticias con la foto real exacta (/api/attachments/...-w560-h336-p-df) y el medio original.
  */
-export async function scrapeGoogleNewsTopicListing(
+async function scrapeGoogleNewsTopicListing(
   topicUrl: string
 ): Promise<ListedNewsCard[]> {
   const results: ListedNewsCard[] = [];
@@ -445,7 +445,7 @@ export async function scrapeGoogleNewsTopicListing(
   return results;
 }
 
-export function clasificarGeografiaChaco(
+function clasificarGeografiaChaco(
   texto: string,
   categoriaDefecto: CategoriaSlug = "locales"
 ): { categoria: CategoriaSlug; localidad: string } {
@@ -544,7 +544,7 @@ function toSentenceCaseHeadline(title: string): string {
   return title;
 }
 
-export const FUENTES_OFICIALES_USUARIO: Array<{
+const FUENTES_OFICIALES_USUARIO: Array<{
   id: string;
   nombre: string;
   url: string;
