@@ -358,20 +358,36 @@ function AdminDashboardContent() {
   };
 
   const handleQuickPublish = async (n: Noticia) => {
-    await fetch("/api/noticias", {
+    const nuevoEstado: "borrador" | "publicado" =
+      n.estado === "publicado" ? "borrador" : "publicado";
+
+    // Actualización visual instantánea en la lista
+    setNoticias((prev) =>
+      prev.map((item) =>
+        item.id === n.id ? { ...item, estado: nuevoEstado } : item
+      )
+    );
+
+    const res = await fetch("/api/noticias", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...n,
-        estado: n.estado === "publicado" ? "borrador" : "publicado",
+        estado: nuevoEstado,
       }),
     });
-    notify(
-      n.estado === "publicado"
-        ? "Noticia pasada a Borrador."
-        : "¡Noticia aprobada y publicada en ChacoHoy!"
-    );
-    loadAll();
+
+    if (res.ok) {
+      notify(
+        nuevoEstado === "publicado"
+          ? "¡Noticia aprobada y publicada en ChacoHoy!"
+          : "Noticia pasada a Borrador."
+      );
+      await loadAll();
+    } else {
+      notify("No se pudo actualizar la noticia. Recarga la página e intenta de nuevo.");
+      await loadAll();
+    }
   };
 
   const handleSocialShare = async (n: Noticia) => {

@@ -38,45 +38,80 @@ export function verifyCredentialsTimingSafe(
 
 /**
  * Genera un token de sesión firmado criptográficamente con HMAC-SHA256 y expiración de 12 horas.
+ * Usa "|" como delimitador para permitir puntos dentro del nombre de usuario (ej. director.chacohoy).
  */
 export function createSignedSessionToken(username: string): string {
   const { secret } = getAdminCredentials();
   const expiresAt = Date.now() + 1000 * 60 * 60 * 12; // 12 horas
   const nonce = crypto.randomBytes(16).toString("hex");
-  const payload = `${username}.${expiresAt}.${nonce}`;
+  const payload = `${username}|${expiresAt}|${nonce}`;
   const signature = crypto
     .createHmac("sha256", secret)
     .update(payload)
     .digest("hex");
-  return `${payload}.${signature}`;
+  return `${payload}|${signature}`;
 }
 
 export function verifySignedSessionToken(token?: string): boolean {
   if (!token) return false;
-  const parts = token.split(".");
-  if (parts.length !== 4) return false;
 
-  const [username, expiresAtStr, nonce, signature] = parts;
-  const expiresAt = Number(expiresAtStr);
-  if (!expiresAt || Date.now() > expiresAt) return false;
+  // Soporte tanto para el nuevo delimitador "|" como para tokens antiguos separados por "."
+  if (token.includes("|")) {
+    const parts = token.split("|");
+    if (parts.length !== 4) return false;
+    const [username, expiresAtStr, nonce, signature] = parts;
+    const expiresAt = Number(expiresAtStr);
+    if (!expiresAt || Date.now() > expiresAt) return false;
 
-  const { secret, username: expectedUser } = getAdminCredentials();
-  if (username !== expectedUser) return false;
+    const { secret, username: expectedUser } = getAdminCredentials();
+    if (username !== expectedUser) return false;
 
-  const payload = `${username}.${expiresAtStr}.${nonce}`;
-  const expectedSig = crypto
-    .createHmac("sha256", secret)
-    .update(payload)
-    .digest("hex");
+    const payload = `${username}|${expiresAtStr}|${nonce}`;
+    const expectedSig = crypto
+      .createHmac("sha256", secret)
+      .update(payload)
+      .digest("hex");
 
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(signature, "hex"),
-      Buffer.from(expectedSig, "hex")
-    );
-  } catch {
-    return false;
+    try {
+      return crypto.timingSafeEqual(
+        Buffer.from(signature, "hex"),
+        Buffer.from(expectedSig, "hex")
+      );
+    } catch {
+      return false;
+    }
   }
+
+  // Fallback para cookie ya emitida con "." donde username es "director.chacohoy"
+  const dotParts = token.split(".");
+  if (dotParts.length >= 4) {
+    const signature = dotParts[dotParts.length - 1];
+    const nonce = dotParts[dotParts.length - 2];
+    const expiresAtStr = dotParts[dotParts.length - 3];
+    const username = dotParts.slice(0, dotParts.length - 3).join(".");
+    const expiresAt = Number(expiresAtStr);
+    if (!expiresAt || Date.now() > expiresAt) return false;
+
+    const { secret, username: expectedUser } = getAdminCredentials();
+    if (username !== expectedUser) return false;
+
+    const payload = `${username}.${expiresAtStr}.${nonce}`;
+    const expectedSig = crypto
+      .createHmac("sha256", secret)
+      .update(payload)
+      .digest("hex");
+
+    try {
+      return crypto.timingSafeEqual(
+        Buffer.from(signature, "hex"),
+        Buffer.from(expectedSig, "hex")
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }
 
 export async function isAuthenticatedRequest(): Promise<boolean> {
