@@ -19,6 +19,10 @@ const BROWSER_UA =
 
 function decodeHtmlEntities(str: string): string {
   return str
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    )
     .replace(/&nbsp;/gi, " ")
     .replace(/&quot;/gi, '"')
     .replace(/&#039;|&#39;|&apos;/gi, "'")
@@ -106,9 +110,15 @@ function getEditorialVolanta(
  * Limpia cualquier mención residual a nombres de medios externos dentro de un texto.
  */
 function stripExternalMediaNames(text: string): string {
-  return text
+  return decodeHtmlEntities(text)
+    .replace(/Ver m[aá]s t[ií]tulos y perspectivas[\s\S]*$/gi, "")
+    .replace(/chevron_right/gi, "")
     .replace(
-      /\b(?:según|a través de|fuente original:|publicó|informó)\s+(?:Infobae|Clarín|Clarin\.com|La Nación|Ámbito|Ambito|Página\/12|Página\|12|Letra P|Google News|DW\.com|3DJuegos)[^.]*\./gi,
+      /\s+-\s+(?:Infobae|Clar[ií]n(?:\.com)?|La Naci[oó]n|Ámbito|Ambito(?:\.com)?|P[aá]gina\s*\/?\s*12|P[aá]gina\|12|Letra P|Perfil|TN|Todo Noticias|El Cronista|Cronista|DW(?:\.com)?|3DJuegos|La Pol[ií]tica Online|Rosario3|La Voz|MDZ Online|BAE Negocios|El Destape| Agencia EFE|Reuters)\b.*$/gi,
+      ""
+    )
+    .replace(
+      /\b(?:según|a través de|fuente original:|publicó|informó)\s+(?:Infobae|Clar[ií]n|Clarin\.com|La Naci[oó]n|Ámbito|Ambito|P[aá]gina\/12|P[aá]gina\|12|Letra P|Google News|DW\.com|3DJuegos)[^.]*\./gi,
       ""
     )
     .replace(/\s+/g, " ")
@@ -673,7 +683,7 @@ async function scrapeGoogleNewsTopicListing(
 
     const html = await res.text();
     const cardRegex =
-      /<figure[^>]+class=["'][^"']*K0q4G[^"']*["'][^>]*>\s*<img[^>]+src=["'](\/api\/attachments\/[^"']+)["'][^>]*>\s*<\/figure>[\s\S]{1,4200}?<a[^>]+class=["']gPFEn["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>([\s\S]{0,3000}?)(?=<figure[^>]+class=["'][^"']*K0q4G|$)/gi;
+      /<figure[^>]+class=["'][^"']*K0q4G[^"']*["'][^>]*>\s*<img[^>]+src=["'](\/api\/attachments\/[^"']+)["'][^>]*>\s*<\/figure>[\s\S]{1,2200}?<a[^>]+class=["']gPFEn["'][^>]+href=["']([^"']+)["'][^>]*>([^<]+)<\/a>([\s\S]{0,1800}?)(?=<figure[^>]+class=["'][^"']*K0q4G|$)/gi;
 
     let match: RegExpExecArray | null;
     while ((match = cardRegex.exec(html)) !== null && results.length < 5) {
@@ -686,28 +696,27 @@ async function scrapeGoogleNewsTopicListing(
       ).toString();
       const rawHref = decodeHtmlEntities(match[2]).replace(/^\.\//, "/");
       const link = new URL(rawHref, "https://news.google.com").toString();
-      const title = decodeHtmlEntities(match[3].replace(/<[^>]+>/g, " "))
-        .replace(/\s+/g, " ")
-        .replace(
-          /\s+Hace\s+\d+\s+(?:hora|horas|minuto|minutos|d[ií]a|d[ií]as)[\s\S]*$/i,
-          ""
-        )
-        .trim();
+      const title = stripExternalMediaNames(
+        decodeHtmlEntities(match[3])
+          .replace(
+            /\s+Hace\s+\d+\s+(?:hora|horas|minuto|minutos|d[ií]a|d[ií]as)[\s\S]*$/i,
+            ""
+          )
+          .trim()
+      );
 
-      // Extraer titulares secundarios del mismo cluster de cobertura en Google News para enriquecer el cuerpo de la noticia
+      // Extraer titulares secundarios limpios del mismo cluster de cobertura
       const clusterTail = match[4] || "";
       const relatedHeadlines: string[] = [];
-      const relRegex = /<a[^>]+class=["']gPFEn["'][^>]*>([\s\S]*?)<\/a>/gi;
+      const relRegex = /<a[^>]+class=["']gPFEn["'][^>]*>([^<]+)<\/a>/gi;
       let relMatch: RegExpExecArray | null;
       while (
         (relMatch = relRegex.exec(clusterTail)) !== null &&
         relatedHeadlines.length < 3
       ) {
-        const relTitle = decodeHtmlEntities(
-          relMatch[1].replace(/<[^>]+>/g, " ")
-        )
-          .replace(/\s+/g, " ")
-          .trim();
+        const relTitle = stripExternalMediaNames(
+          decodeHtmlEntities(relMatch[1]).trim()
+        );
         if (relTitle && relTitle.length > 20 && relTitle !== title) {
           relatedHeadlines.push(relTitle);
         }
@@ -933,13 +942,18 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Limpiar o actualizar cualquier noticia existente que tuviera texto corto o mencionara "Fuente original:" / nombres de otros medios en la volanta
+  // Limpiar o actualizar cualquier noticia existente que tuviera texto corto, restos de cluster o entidades HTML sin decodificar
   const prevNoticias = await getNoticias();
   for (const prev of prevNoticias) {
     if (
       prev.contenido_html.includes("Fuente original:") ||
+      prev.contenido_html.includes("chevron_right") ||
+      prev.contenido_html.includes("Ver más títulos") ||
+      prev.contenido_html.includes("&#") ||
+      prev.bajada.includes("&#") ||
       prev.bajada.includes("a través de") ||
-      prev.contenido_html.length < 320
+      prev.contenido_html.length < 320 ||
+      (prev.fuente_url && prev.fuente_url.includes("news.google.com"))
     ) {
       await deleteNoticia(prev.id);
     }
