@@ -1,0 +1,41 @@
+name: ChacoHoy - Recopilador IA & Scraper (Cada 30 min)
+
+on:
+  schedule:
+    # Se ejecuta automáticamente cada 30 minutos gratis en GitHub Actions
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Permite ejecutarlo manualmente con un clic desde GitHub
+
+jobs:
+  scrape-and-classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar repositorio ChacoHoy
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: scraper-worker/requirements.txt
+
+      - name: Instalar dependencias del Scraper y Gemini
+        working-directory: ./scraper-worker
+        run: |
+          pip install -r requirements.txt
+
+      - name: Ejecutar Recopilador IA ChacoHoy
+        working-directory: ./scraper-worker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PORTAL_BASE_URL: ${{ secrets.PORTAL_BASE_URL }}
+          META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+          META_IG_USER_ID: ${{ secrets.META_IG_USER_ID }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: |
+          python main.py

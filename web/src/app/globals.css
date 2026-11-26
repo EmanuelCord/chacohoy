@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-white text-slate-900 antialiased;
+  }
+}
+
+.article-content p {
+  @apply mb-5 text-lg leading-relaxed text-slate-800;
+}
+
+.article-content h2,
+.article-content h3 {
+  @apply mt-8 mb-3 font-serif text-2xl font-bold text-brand-900;
+}
+
+.article-content blockquote {
+  @apply my-6 border-l-4 border-brand-700 bg-brand-50/70 py-4 px-6 font-serif text-xl italic text-brand-950 rounded-r-lg;
+}
+
+.article-content ul {
+  @apply mb-5 list-disc pl-6 space-y-2 text-lg text-slate-800;
+}
+
+.article-content strong {
+  @apply font-semibold text-slate-950;
+}
