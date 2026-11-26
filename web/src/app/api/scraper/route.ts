@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   addLog,
+  deleteNoticia,
   getFuentes,
   getLogs,
   getNoticias,
@@ -53,15 +54,332 @@ function isIgnoredImage(url: string): boolean {
 }
 
 /**
- * Extrae título, volanta, texto completo y la IMAGEN REAL EXACTA
+ * Devuelve una volanta temática editorial limpia de ChacoHoy (nunca el nombre de otro medio).
+ */
+function getEditorialVolanta(
+  categoria: CategoriaSlug,
+  titulo: string
+): string {
+  const lower = titulo.toLowerCase();
+  if (categoria === "locales") {
+    if (lower.includes("obra") || lower.includes("pavimento") || lower.includes("acceso"))
+      return "INFRAESTRUCTURA URBANA";
+    if (lower.includes("salud") || lower.includes("hospital") || lower.includes("medicamento"))
+      return "SALUD PÚBLICA";
+    if (lower.includes("escuela") || lower.includes("educación") || lower.includes("docente"))
+      return "EDUCACIÓN PROVINCIAL";
+    return "GRAN RESISTENCIA";
+  }
+  if (categoria === "interior") {
+    if (lower.includes("agua") || lower.includes("acueducto") || lower.includes("cloaca"))
+      return "OBRAS EN EL INTERIOR";
+    if (lower.includes("campo") || lower.includes("forestal") || lower.includes("producción"))
+      return "PRODUCCIÓN CHAQUEÑA";
+    return "INTERIOR PROVINCIAL";
+  }
+  if (categoria === "economia") {
+    if (lower.includes("dólar") || lower.includes("mercado") || lower.includes("riesgo"))
+      return "FINANZAS Y MERCADOS";
+    if (lower.includes("inflación") || lower.includes("consumo") || lower.includes("oferta"))
+      return "CONSUMO Y PRECIOS";
+    return "PANORAMA ECONÓMICO";
+  }
+  if (categoria === "tecnologia") {
+    if (lower.includes("nasa") || lower.includes("marte") || lower.includes("espacio") || lower.includes("ciencia"))
+      return "CIENCIA Y ESPACIO";
+    if (lower.includes("ia") || lower.includes("chatgpt") || lower.includes("inteligencia"))
+      return "INTELIGENCIA ARTIFICIAL";
+    return "INNOVACIÓN Y TECNOLOGÍA";
+  }
+  if (categoria === "internacionales") {
+    return "AGENDA INTERNACIONAL";
+  }
+  if (categoria === "politica") {
+    if (lower.includes("congreso") || lower.includes("diputado") || lower.includes("senado") || lower.includes("presupuesto"))
+      return "DEBATE PARLAMENTARIO";
+    return "ESCENARIO POLÍTICO";
+  }
+  return "PANORAMA NACIONAL";
+}
+
+/**
+ * Limpia cualquier mención residual a nombres de medios externos dentro de un texto.
+ */
+function stripExternalMediaNames(text: string): string {
+  return text
+    .replace(
+      /\b(?:según|a través de|fuente original:|publicó|informó)\s+(?:Infobae|Clarín|Clarin\.com|La Nación|Ámbito|Ambito|Página\/12|Página\|12|Letra P|Google News|DW\.com|3DJuegos)[^.]*\./gi,
+      ""
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Busca contexto periodístico adicional en Bing News RSS para ampliar noticias de Google News
+ * y obtener descripciones reales de múltiples agencias sobre el mismo hecho.
+ */
+async function fetchExtendedTopicContext(headline: string): Promise<string[]> {
+  const snippets: string[] = [];
+  try {
+    const cleanQuery = headline
+      .replace(/[^\w\sáéíóúñÁÉÍÓÚÑ]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 3)
+      .slice(0, 7)
+      .join(" ");
+    const url = `https://www.bing.com/news/search?q=${encodeURIComponent(
+      cleanQuery
+    )}&format=rss&setlang=es-AR`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4500);
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": BROWSER_UA },
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return snippets;
+
+    const xml = await res.text();
+    const descRegex =
+      /<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>|<description>([\s\S]*?)<\/description>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = descRegex.exec(xml)) !== null && snippets.length < 5) {
+      const raw = decodeHtmlEntities(
+        (m[1] || m[2] || "").replace(/<[^>]+>/g, " ")
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (
+        raw.length > 65 &&
+        !raw.toLowerCase().includes("bing news") &&
+        !snippets.some((s) => s.slice(0, 40) === raw.slice(0, 40))
+      ) {
+        snippets.push(stripExternalMediaNames(raw));
+      }
+    }
+  } catch {
+    // Continuar sin snippets externos si hay timeout
+  }
+  return snippets;
+}
+
+/**
+ * Construye una nota periodística extensa, informativa y 100% propia de ChacoHoy
+ * (de 5 a 6 párrafos con subtítulos <h3> y sin mencionar jamás de dónde provino).
+ */
+async function buildComprehensiveArticle(params: {
+  titulo: string;
+  categoria: CategoriaSlug;
+  localidad: string;
+  relatedHeadlines?: string[];
+  existingParagraphs?: string[];
+}): Promise<{
+  volanta: string;
+  bajada: string;
+  contenido_html: string;
+}> {
+  const {
+    titulo,
+    categoria,
+    localidad,
+    relatedHeadlines = [],
+    existingParagraphs = [],
+  } = params;
+  const volanta = getEditorialVolanta(categoria, titulo);
+
+  // 1. Si ya tenemos un cuerpo largo extraído directamente del artículo (ej. chaco.gob.ar o letrap.com.ar con 4+ párrafos)
+  const validExisting = existingParagraphs
+    .map((p) => stripExternalMediaNames(p))
+    .filter((p) => p.length > 45);
+
+  if (validExisting.length >= 4) {
+    const bajada = validExisting[0].slice(0, 260);
+    const htmlParts: string[] = [];
+    validExisting.forEach((p, idx) => {
+      if (p === p.toUpperCase() && p.length < 95) {
+        htmlParts.push(`<h3>${toSentenceCaseHeadline(p)}</h3>`);
+      } else {
+        if (idx === 2 && !htmlParts.some((h) => h.startsWith("<h3>"))) {
+          htmlParts.push(`<h3>Detalles y alcance de la medida</h3>`);
+        }
+        htmlParts.push(`<p>${p}</p>`);
+      }
+    });
+    return {
+      volanta,
+      bajada,
+      contenido_html: htmlParts.join(""),
+    };
+  }
+
+  // 2. Si está configurada la clave de Gemini, pedirle un desarrollo periodístico extenso de 5 párrafos sin citar medios externos
+  const apiKey = process.env.GEMINI_API_KEY;
+  const extraSnippets = await fetchExtendedTopicContext(titulo);
+  const contextMaterial = [
+    ...validExisting,
+    ...relatedHeadlines,
+    ...extraSnippets,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  if (apiKey) {
+    try {
+      const prompt = `Eres la redacción periodística de ChacoHoy. Redacta una noticia extensa, completa, seria e informativa (mínimo 5 párrafos largos y un subtítulo <h3>) sobre el siguiente hecho.
+REGLAS ESTRICTAS:
+1. PROHIBIDO mencionar a otros medios o fuentes externas (nunca menciones Infobae, Clarín, La Nación, Ámbito, Google News, Letra P, etc.).
+2. Devuelve ÚNICAMENTE un JSON con:
+{
+  "volanta": "${volanta}",
+  "bajada": "Copete periodístico informativo de 2 a 3 oraciones sin citar otros diarios",
+  "contenido_html": "<p>Párrafo 1...</p><p>Párrafo 2...</p><h3>Subtítulo informativo</h3><p>Párrafo 3...</p><p>Párrafo 4...</p><p>Párrafo 5...</p>"
+}
+
+Titular: ${titulo}
+Sección: ${categoria} (${localidad})
+Datos y contexto del hecho:
+${contextMaterial}`;
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { responseMimeType: "application/json" },
+          }),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const textOut = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        const parsed = JSON.parse(textOut);
+        if (parsed.contenido_html && parsed.contenido_html.length > 350) {
+          return {
+            volanta: parsed.volanta || volanta,
+            bajada: stripExternalMediaNames(parsed.bajada || titulo),
+            contenido_html: stripExternalMediaNames(parsed.contenido_html),
+          };
+        }
+      }
+    } catch {
+      // Continuar con el motor editorial estructurado
+    }
+  }
+
+  // 3. Motor Editorial Extenso de ChacoHoy (5 a 6 párrafos informativos combinando los datos recolectados del suceso)
+  const cleanTitle = titulo.replace(/\.$/, "").trim();
+  const leadSnippet =
+    extraSnippets[0] ||
+    validExisting[0] ||
+    `${cleanTitle}, en el marco de una jornada marcada por el seguimiento de los principales indicadores y novedades del sector.`;
+
+  const bajada =
+    leadSnippet.length > 85
+      ? leadSnippet.slice(0, 260)
+      : `${cleanTitle}. El informe completo con los puntos clave, el contexto actualizado y las repercusiones del tema.`;
+
+  const paragraphs: string[] = [];
+
+  // Párrafo 1: Apertura informativa directa
+  paragraphs.push(
+    `<p>${cleanTitle}. ${
+      extraSnippets[0] && extraSnippets[0] !== cleanTitle
+        ? extraSnippets[0]
+        : "El tema se ubicó en el centro de la agenda informativa tras conocerse los últimos reportes oficiales y el análisis de los especialistas del área."
+    }</p>`
+  );
+
+  // Párrafo 2: Desarrollo de antecedentes / segundo snippet real
+  if (extraSnippets[1]) {
+    paragraphs.push(`<p>${extraSnippets[1]}</p>`);
+  } else if (relatedHeadlines[0]) {
+    paragraphs.push(
+      `<p>En la misma línea, dentro del evolución reciente del caso se destacó que ${
+        relatedHeadlines[0].charAt(0).toLowerCase() +
+        relatedHeadlines[0].slice(1)
+      }, lo que aportó nuevos elementos para comprender la dimensión del acontecimiento.</p>`
+    );
+  } else {
+    paragraphs.push(
+      `<p>De acuerdo con los datos relevados, la situación involucra una serie de factores técnicos y operativos que vienen siendo monitoreados de cerca para evaluar su evolución en el corto y mediano plazo.</p>`
+    );
+  }
+
+  // Subtítulo intermedio según la sección
+  const subtituloPorSeccion: Record<CategoriaSlug, string> = {
+    locales: "Impacto y seguimiento en el área metropolitana",
+    interior: "Alcance en las localidades del interior chaqueño",
+    politica: "Claves del escenario político y parlamentario",
+    economia: "Análisis de los indicadores y perspectivas del sector",
+    nacionales: "Los puntos centrales y el impacto a nivel nacional",
+    internacionales: "Repercusiones y contexto en el escenario global",
+    tecnologia: "Detalles técnicos y avances de la investigación",
+  };
+  paragraphs.push(`<h3>${subtituloPorSeccion[categoria]}</h3>`);
+
+  // Párrafo 3: Tercer snippet o desglose temático
+  if (extraSnippets[2]) {
+    paragraphs.push(`<p>${extraSnippets[2]}</p>`);
+  } else if (relatedHeadlines[1]) {
+    paragraphs.push(
+      `<p>Asimismo, otro de los ejes relevantes vinculados al tema señala que ${
+        relatedHeadlines[1].charAt(0).toLowerCase() +
+        relatedHeadlines[1].slice(1)
+      }, ampliando el panorama sobre las decisiones y estudios en curso.</p>`
+    );
+  } else {
+    paragraphs.push(
+      `<p>Los informes técnicos subrayan que este tipo de novedades genera un efecto directo sobre la planificación del sector, abriendo nuevas etapas de evaluación por parte de los equipos intervinientes y las instituciones vinculadas.</p>`
+    );
+  }
+
+  // Párrafo 4: Cuarto snippet o profundización por categoría
+  if (extraSnippets[3]) {
+    paragraphs.push(`<p>${extraSnippets[3]}</p>`);
+  } else {
+    const contextoPorCategoria: Record<CategoriaSlug, string> = {
+      locales:
+        "En el Gran Resistencia, las autoridades y equipos técnicos mantienen un esquema de trabajo articulado para dar seguimiento a cada etapa de implementación y responder a las demandas de los vecinos de la capital chaqueña y zonas aledañas.",
+      interior:
+        "Para las comunidades del interior de la provincia del Chaco, estas acciones representan un paso significativo en materia de integración territorial, fortaleciendo la infraestructura y los servicios en las distintas regiones productivas.",
+      politica:
+        "En el plano institucional, las negociaciones y el intercambio entre los distintos bloques y actores políticos continuarán durante los próximos días con el objetivo de alcanzar consensos en torno a los puntos principales de la agenda.",
+      economia:
+        "Los analistas económicos coinciden en que la dinámica de las próximas semanas será determinante para consolidar la tendencia, prestando especial atención al comportamiento del consumo, la actividad productiva y la estabilidad financiera.",
+      nacionales:
+        "A nivel federal, la medida es seguida con atención por las provincias y los distintos sectores sociales y productivos de la Argentina, dado su impacto directo en la actividad cotidiana y en la agenda pública nacional.",
+      internacionales:
+        "En el plano diplomático y geopolítico, los observadores internacionales advierten que el desarrollo de los acontecimientos en las próximas jornadas marcará el pulso de las relaciones bilaterales y los acuerdos multilaterales en la región.",
+      tecnologia:
+        "Especialistas e investigadores del ámbito científico y tecnológico destacaron la relevancia del avance, señalando que las próximas pruebas y actualizaciones permitirán conocer con mayor precisión todo el potencial de este desarrollo.",
+    };
+    paragraphs.push(`<p>${contextoPorCategoria[categoria]}</p>`);
+  }
+
+  // Párrafo 5: Cierre periodístico informativo
+  paragraphs.push(
+    `<p>Se espera que en el transcurso de las próximas horas se den a conocer nuevos informes y precisiones oficiales que permitan ampliar los detalles sobre la evolución de este tema.</p>`
+  );
+
+  return {
+    volanta,
+    bajada: stripExternalMediaNames(bajada),
+    contenido_html: paragraphs.join(""),
+  };
+}
+
+/**
+ * Extrae título, volanta, texto completo (todos los párrafos) y la IMAGEN REAL EXACTA
  * desde una URL de noticia (compatible con chaco.gob.ar, letrap.com.ar y cualquier diario digital).
  */
 async function scrapeArticlePage(articleUrl: string): Promise<{
   title?: string;
   volanta?: string;
   description?: string;
-  bodyHtml?: string;
-  bodyText?: string;
+  paragraphs?: string[];
   imageUrl?: string;
 }> {
   if (!articleUrl || !articleUrl.startsWith("http")) return {};
@@ -152,22 +470,7 @@ async function scrapeArticlePage(articleUrl: string): Promise<{
       .replace(/\s+/g, " ")
       .trim();
 
-    // 5. Extraer Volanta
-    const panelMatch = html.match(
-      /<section[^>]+class=["'][^"']*container-panel[^"']*["'][^>]*>[\s\S]*?<h1[^>]*>([\s\S]*?)<\/h1>/i
-    );
-    const badgeMatch = html.match(
-      /<span[^>]+class=["'][^"']*news-article__badge[^"']*["'][^>]*>([\s\S]*?)<\/span>/i
-    );
-    const rawVolanta = panelMatch?.[1] || badgeMatch?.[1];
-    const volanta = rawVolanta
-      ? decodeHtmlEntities(rawVolanta.replace(/<[^>]+>/g, " "))
-          .replace(/\s+/g, " ")
-          .trim()
-          .toUpperCase()
-      : undefined;
-
-    // 6. Extraer Descripción / Bajada (og:description)
+    // 5. Extraer Descripción / Bajada (og:description)
     const ogDescMatch =
       html.match(
         /<meta[^>]+(?:property|name)=["'](?:og:description|description)["'][^>]+content=["']([^"']+)["']/i
@@ -179,10 +482,8 @@ async function scrapeArticlePage(articleUrl: string): Promise<{
       ? decodeHtmlEntities(ogDescMatch[1]).replace(/\s+/g, " ").trim()
       : undefined;
 
-    // 7. Extraer Cuerpo del artículo:
-    let bodyHtml = "";
-    let bodyText = "";
-
+    // 6. Extraer TODOS los párrafos del cuerpo del artículo:
+    const paragraphs: string[] = [];
     const chacoContentMatch = html.match(
       /<h5[^>]+class=["'][^"']*content-news[^"']*["'][^>]*>([\s\S]*?)<\/h5>/i
     );
@@ -192,53 +493,38 @@ async function scrapeArticlePage(articleUrl: string): Promise<{
         .replace(/<\/?div[^>]*>/gi, "\n")
         .split(/(?:<br\s*\/?>\s*){2,}|\n{2,}/gi);
 
-      const cleanParagraphs = rawBlocks
-        .map((b) =>
-          decodeHtmlEntities(
-            b.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, " ")
-          )
-            .replace(/\s+/g, " ")
-            .trim()
+      for (const b of rawBlocks) {
+        const cleanP = decodeHtmlEntities(
+          b.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, " ")
         )
-        .filter((b) => b.length > 25);
-
-      bodyText = cleanParagraphs.join("\n\n");
-      bodyHtml = cleanParagraphs
-        .map((p) =>
-          p === p.toUpperCase() && p.length < 95
-            ? `<h3>${p}</h3>`
-            : `<p>${p}</p>`
-        )
-        .join("");
+          .replace(/\s+/g, " ")
+          .trim();
+        if (cleanP.length > 25) {
+          paragraphs.push(cleanP);
+        }
+      }
     } else {
-      const paragraphs: string[] = [];
       const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
       let pMatch: RegExpExecArray | null;
-      while ((pMatch = pRegex.exec(html)) !== null && paragraphs.length < 10) {
+      while ((pMatch = pRegex.exec(html)) !== null && paragraphs.length < 18) {
         const cleanP = decodeHtmlEntities(pMatch[1].replace(/<[^>]+>/g, " "))
           .replace(/\s+/g, " ")
           .trim();
         if (
-          cleanP.length > 60 &&
+          cleanP.length > 55 &&
           !cleanP.toLowerCase().includes("cookies") &&
-          !cleanP.toLowerCase().includes("todos los derechos reservados")
+          !cleanP.toLowerCase().includes("todos los derechos reservados") &&
+          !cleanP.toLowerCase().includes("suscribite")
         ) {
           paragraphs.push(cleanP);
         }
       }
-      bodyText = paragraphs.join("\n\n");
-      bodyHtml = paragraphs.map((p) => `<p>${p}</p>`).join("");
     }
-
-    const description =
-      ogDescription || bodyText.split("\n\n")[0]?.slice(0, 260) || title;
 
     return {
       title,
-      volanta,
-      description,
-      bodyHtml,
-      bodyText,
+      description: ogDescription || paragraphs[0],
+      paragraphs,
       imageUrl,
     };
   } catch {
@@ -250,8 +536,8 @@ interface ListedNewsCard {
   title: string;
   link: string;
   imageUrl: string;
-  volanta?: string;
   bajada?: string;
+  relatedHeadlines?: string[];
 }
 
 /**
@@ -280,7 +566,6 @@ async function scrapeChacoGobListing(
       const cardHtml = match[1];
       const hrefMatch = cardHtml.match(/<a[^>]+href=["']([^"']+)["']/i);
       const imgMatch = cardHtml.match(/<img[^>]+src=["']([^"']+)["']/i);
-      const h4Match = cardHtml.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
       const h3Match = cardHtml.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
 
       if (hrefMatch?.[1] && h3Match?.[1]) {
@@ -288,17 +573,12 @@ async function scrapeChacoGobListing(
         const imageUrl = imgMatch?.[1]
           ? new URL(imgMatch[1].trim(), portalUrl).toString()
           : "";
-        const volanta = h4Match?.[1]
-          ? decodeHtmlEntities(h4Match[1].replace(/<[^>]+>/g, " "))
-              .replace(/\s+/g, " ")
-              .trim()
-          : "ACTUALIDAD CHACO";
         const title = decodeHtmlEntities(h3Match[1].replace(/<[^>]+>/g, " "))
           .replace(/\s+/g, " ")
           .trim();
 
         if (title && imageUrl && !isIgnoredImage(imageUrl)) {
-          results.push({ title, link, imageUrl, volanta });
+          results.push({ title, link, imageUrl });
         }
       }
     }
@@ -309,7 +589,7 @@ async function scrapeChacoGobListing(
 }
 
 /**
- * 2. Scraper de Letra P (https://www.letrap.com.ar/) con sus fotos reales de alta resolución
+ * 2. Scraper de Letra P (https://www.letrap.com.ar/)
  */
 async function scrapeLetraPListing(
   portalUrl: string
@@ -326,7 +606,6 @@ async function scrapeLetraPListing(
     if (!res.ok) return results;
 
     const html = await res.text();
-    // En Letra P cada nota es un <a ... href="https://www.letrap.com.ar/..."><article class="news-article__article-wrapper">...</article></a>
     const blockRegex =
       /<a[^>]+href=["'](https:\/\/www\.letrap\.com\.ar\/[^"']+-n\d+)["'][^>]*>\s*<article[^>]*>([\s\S]*?)<\/article>\s*<\/a>/gi;
     let match: RegExpExecArray | null;
@@ -341,9 +620,6 @@ async function scrapeLetraPListing(
       const altMatch = articleHtml.match(
         /<img[^>]+alt=["']([^"']+)["'][^>]*>/i
       );
-      const badgeMatch = articleHtml.match(
-        /<span[^>]+class=["'][^"']*news-article__badge[^"']*["'][^>]*>([\s\S]*?)<\/span>/i
-      );
       const titleMatch = articleHtml.match(
         /<h[1234][^>]+class=["'][^"']*news-article__title[^"']*["'][^>]*>([\s\S]*?)<\/h[1234]>/i
       );
@@ -354,12 +630,6 @@ async function scrapeLetraPListing(
             .replace(/\s+/g, " ")
             .trim()
         : "";
-      const volanta = badgeMatch?.[1]
-        ? decodeHtmlEntities(badgeMatch[1].replace(/<[^>]+>/g, " "))
-            .replace(/\s+/g, " ")
-            .trim()
-            .toUpperCase()
-        : "POLÍTICA NACIONAL";
       const bajada = altMatch?.[1]
         ? decodeHtmlEntities(altMatch[1]).replace(/\s+/g, " ").trim()
         : undefined;
@@ -370,7 +640,7 @@ async function scrapeLetraPListing(
         !isIgnoredImage(imageUrl) &&
         !results.some((r) => r.link === link)
       ) {
-        results.push({ title, link, imageUrl, volanta, bajada });
+        results.push({ title, link, imageUrl, bajada });
       }
     }
   } catch (e) {
@@ -381,7 +651,8 @@ async function scrapeLetraPListing(
 
 /**
  * 3. Scraper de páginas de Tópicos de Google News (https://news.google.com/topics/CAAq...)
- * Extrae las noticias con la foto real exacta (/api/attachments/...-w560-h336-p-df) y el medio original.
+ * Extrae las noticias con la foto real exacta (/api/attachments/...-w560-h336-p-df) y los titulares relacionados del cluster
+ * sin guardar ni mostrar el nombre del medio externo.
  */
 async function scrapeGoogleNewsTopicListing(
   topicUrl: string
@@ -401,28 +672,42 @@ async function scrapeGoogleNewsTopicListing(
     if (!res.ok) return results;
 
     const html = await res.text();
-
-    // En el HTML de Google News Topic, cada tarjeta principal con foto tiene:
-    // <img class="Quavad vwBmvb" ... src="/api/attachments/..." /> ... <div class="vr1PYe"...>MEDIO</div> ... <a class="gPFEn" href="./read/...">TITULAR</a>
     const cardRegex =
-      /<figure[^>]+class=["'][^"']*K0q4G[^"']*["'][^>]*>\s*<img[^>]+src=["'](\/api\/attachments\/[^"']+)["'][^>]*>\s*<\/figure>[\s\S]{1,1200}?<div[^>]+class=["']vr1PYe["'][^>]*>([\s\S]*?)<\/div>[\s\S]{1,3500}?<a[^>]+class=["']gPFEn["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      /<figure[^>]+class=["'][^"']*K0q4G[^"']*["'][^>]*>\s*<img[^>]+src=["'](\/api\/attachments\/[^"']+)["'][^>]*>\s*<\/figure>[\s\S]{1,4200}?<a[^>]+class=["']gPFEn["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>([\s\S]{0,3000}?)(?=<figure[^>]+class=["'][^"']*K0q4G|$)/gi;
 
     let match: RegExpExecArray | null;
     while ((match = cardRegex.exec(html)) !== null && results.length < 5) {
       const rawImgPath = match[1]
         .replace(/-w\d+-h\d+-p-df/i, "-w560-h336-p-df")
         .trim();
-      const imageUrl = new URL(rawImgPath, "https://news.google.com").toString();
-      const sourceName = decodeHtmlEntities(
-        match[2].replace(/<[^>]+>/g, " ")
-      )
-        .replace(/\s+/g, " ")
-        .trim();
-      const rawHref = decodeHtmlEntities(match[3]).replace(/^\.\//, "/");
+      const imageUrl = new URL(
+        rawImgPath,
+        "https://news.google.com"
+      ).toString();
+      const rawHref = decodeHtmlEntities(match[2]).replace(/^\.\//, "/");
       const link = new URL(rawHref, "https://news.google.com").toString();
-      const title = decodeHtmlEntities(match[4].replace(/<[^>]+>/g, " "))
+      const title = decodeHtmlEntities(match[3].replace(/<[^>]+>/g, " "))
         .replace(/\s+/g, " ")
         .trim();
+
+      // Extraer titulares secundarios del mismo cluster de cobertura en Google News para enriquecer el cuerpo de la noticia
+      const clusterTail = match[4] || "";
+      const relatedHeadlines: string[] = [];
+      const relRegex = /<a[^>]+class=["']gPFEn["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let relMatch: RegExpExecArray | null;
+      while (
+        (relMatch = relRegex.exec(clusterTail)) !== null &&
+        relatedHeadlines.length < 3
+      ) {
+        const relTitle = decodeHtmlEntities(
+          relMatch[1].replace(/<[^>]+>/g, " ")
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+        if (relTitle && relTitle.length > 20 && relTitle !== title) {
+          relatedHeadlines.push(relTitle);
+        }
+      }
 
       if (
         title &&
@@ -434,8 +719,7 @@ async function scrapeGoogleNewsTopicListing(
           title,
           link,
           imageUrl,
-          volanta: sourceName ? sourceName.toUpperCase() : "ACTUALIDAD",
-          bajada: `${title}. Cobertura nacional e internacional destacada a través de ${sourceName || "agencias"}.`,
+          relatedHeadlines,
         });
       }
     }
@@ -449,7 +733,6 @@ function clasificarGeografiaChaco(
   texto: string,
   categoriaDefecto: CategoriaSlug = "locales"
 ): { categoria: CategoriaSlug; localidad: string } {
-  // Si la fuente es específica de Internacionales, Tecnología, Economía o Nacionales (fuera de Chaco), respetar su sección salvo que mencione explícitamente una ciudad del Chaco
   const lower = texto.toLowerCase();
 
   const interiorExtra = [
@@ -476,31 +759,19 @@ function clasificarGeografiaChaco(
     }
   }
 
-  if (
-    categoriaDefecto === "internacionales" ||
-    categoriaDefecto === "tecnologia" ||
-    categoriaDefecto === "economia" ||
-    categoriaDefecto === "nacionales" ||
-    categoriaDefecto === "politica"
-  ) {
-    const locMap: Record<CategoriaSlug, string> = {
-      locales: "Resistencia",
-      interior: "Interior del Chaco",
-      politica: "Argentina",
-      economia: "Mercados",
-      nacionales: "Argentina",
-      internacionales: "Mundo",
-      tecnologia: "Ciencia y Tech",
-    };
-    return {
-      categoria: categoriaDefecto,
-      localidad: locMap[categoriaDefecto],
-    };
-  }
+  const locMap: Record<CategoriaSlug, string> = {
+    locales: "Resistencia",
+    interior: "Interior del Chaco",
+    politica: "Argentina",
+    economia: "Argentina",
+    nacionales: "Argentina",
+    internacionales: "Internacional",
+    tecnologia: "Tecnología",
+  };
 
   return {
     categoria: categoriaDefecto,
-    localidad: "Chaco",
+    localidad: locMap[categoriaDefecto] || "Chaco",
   };
 }
 
@@ -553,42 +824,42 @@ const FUENTES_OFICIALES_USUARIO: Array<{
 }> = [
   {
     id: "f-chaco-gob",
-    nombre: "Gobierno del Chaco - Noticias (Locales e Interior)",
+    nombre: "Actualidad Chaco (Locales e Interior)",
     url: "https://chaco.gob.ar/noticias",
     tipo: "web_chaco",
     categoria_defecto: "locales",
   },
   {
     id: "f-letrap",
-    nombre: "Letra P - Nacionales y Política (letrap.com.ar)",
+    nombre: "Política y Congreso",
     url: "https://www.letrap.com.ar/",
     tipo: "web_chaco",
     categoria_defecto: "politica",
   },
   {
     id: "f-gn-nacionales",
-    nombre: "Google News - Nacionales Argentina",
+    nombre: "Nacionales Argentina",
     url: "https://news.google.com/topics/CAAqJQgKIh9DQkFTRVFvSEwyMHZNR3BuWkJJR1pYTXROREU1S0FBUAE?hl=es-419&gl=AR&ceid=AR%3Aes-419",
     tipo: "google_news",
     categoria_defecto: "nacionales",
   },
   {
     id: "f-gn-internacionales",
-    nombre: "Google News - Internacionales",
+    nombre: "Internacionales",
     url: "https://news.google.com/topics/CAAqLAgKIiZDQkFTRmdvSUwyMHZNRGx1YlY4U0JtVnpMVFF4T1JvQ1FWSW9BQVAB?hl=es-419&gl=AR&ceid=AR%3Aes-419",
     tipo: "google_news",
     categoria_defecto: "internacionales",
   },
   {
     id: "f-gn-tecnologia",
-    nombre: "Google News - Ciencia y Tecnología",
+    nombre: "Ciencia y Tecnología",
     url: "https://news.google.com/topics/CAAqLQgKIidDQkFTRndvSkwyMHZNR1ptZHpWbUVnWmxjeTAwTVRrYUFrRlNLQUFQAQ?hl=es-419&gl=AR&ceid=AR%3Aes-419",
     tipo: "google_news",
     categoria_defecto: "tecnologia",
   },
   {
     id: "f-gn-economia",
-    nombre: "Google News - Economía",
+    nombre: "Economía y Mercados",
     url: "https://news.google.com/topics/CAAqLAgKIiZDQkFTRmdvSUwyMHZNRGx6TVdZU0JtVnpMVFF4T1JvQ1FWSW9BQVAB?hl=es-419&gl=AR&ceid=AR%3Aes-419",
     tipo: "google_news",
     categoria_defecto: "economia",
@@ -611,36 +882,35 @@ export async function POST(req: NextRequest) {
     const titleBase = toSentenceCaseHeadline(
       scraped.title || rawText.split(".")[0] || "Noticia de ChacoHoy"
     );
-    const fullText = [titleBase, scraped.bodyText || rawText]
-      .filter(Boolean)
-      .join("\n\n");
+    const existingParagraphs =
+      scraped.paragraphs && scraped.paragraphs.length > 0
+        ? scraped.paragraphs
+        : rawText.split(/\n+/).filter(Boolean);
 
-    const geo = clasificarGeografiaChaco(fullText, "locales");
-    const bajada =
-      scraped.description ||
-      (scraped.bodyText
-        ? scraped.bodyText.split("\n\n")[0]
-        : rawText.slice(0, 240));
-    const desarrolloHtml =
-      scraped.bodyHtml ||
-      rawText
-        .split(/\n+/)
-        .filter(Boolean)
-        .map((p) => `<p>${p}</p>`)
-        .join("");
+    const geo = clasificarGeografiaChaco(
+      `${titleBase} ${existingParagraphs.join(" ")}`,
+      "locales"
+    );
+
+    const built = await buildComprehensiveArticle({
+      titulo: titleBase,
+      categoria: geo.categoria,
+      localidad: geo.localidad,
+      existingParagraphs,
+    });
 
     await addLog({
       tipo: "ia_gemini",
       estado: "exito",
-      mensaje: `Noticia extraída con su foto original y clasificada en '${geo.categoria}' (${geo.localidad}).`,
+      mensaje: `Noticia redactada en formato extenso y clasificada en '${geo.categoria}' (${geo.localidad}).`,
     });
 
     return NextResponse.json({
       resultado: {
         titulo_reescrito: titleBase,
-        volanta: scraped.volanta || "ACTUALIDAD CHACO",
-        bajada,
-        desarrollo_html: desarrolloHtml,
+        volanta: built.volanta,
+        bajada: built.bajada,
+        desarrollo_html: built.contenido_html,
         categoria: geo.categoria,
         localidad: geo.localidad,
         imagen_url: toProxiedImageUrl(scraped.imageUrl),
@@ -648,7 +918,6 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Sincronizar las 6 fuentes oficiales del usuario en la tabla de fuentes
   for (const f of FUENTES_OFICIALES_USUARIO) {
     await saveFuente({
       id: f.id,
@@ -660,13 +929,25 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Limpiar o actualizar cualquier noticia existente que tuviera texto corto o mencionara "Fuente original:" / nombres de otros medios en la volanta
+  const prevNoticias = await getNoticias();
+  for (const prev of prevNoticias) {
+    if (
+      prev.contenido_html.includes("Fuente original:") ||
+      prev.bajada.includes("a través de") ||
+      prev.contenido_html.length < 320
+    ) {
+      await deleteNoticia(prev.id);
+    }
+  }
+
   const fuentes = (await getFuentes()).filter((f) => f.activa);
   const existentes = await getNoticias();
   let nuevas = 0;
 
   for (const fuente of fuentes) {
     let cards: ListedNewsCard[] = [];
-    const maxPerSource = fuente.url.includes("chaco.gob.ar") ? 4 : 3;
+    const maxPerSource = fuente.url.includes("chaco.gob.ar") ? 5 : 3;
 
     if (fuente.url.includes("chaco.gob.ar")) {
       cards = await scrapeChacoGobListing(fuente.url);
@@ -690,47 +971,47 @@ export async function POST(req: NextRequest) {
 
       if (!yaExiste && card.imageUrl) {
         let tituloFinal = toSentenceCaseHeadline(card.title);
-        let volantaFinal = card.volanta || fuente.categoria_defecto.toUpperCase();
-        let bajadaFinal = card.bajada || tituloFinal;
-        let contenidoHtmlFinal = `<p><strong>${volantaFinal} —</strong> ${bajadaFinal}</p><p>Fuente original: <strong>${fuente.nombre}</strong>.</p>`;
+        let existingParagraphs: string[] = card.bajada ? [card.bajada] : [];
         let imgFinal = card.imageUrl;
 
-        // Si es chaco.gob.ar o letrap.com.ar, entrar al artículo para traer todos los párrafos completos
         if (
           card.link.includes("chaco.gob.ar") ||
           card.link.includes("letrap.com.ar")
         ) {
           const detail = await scrapeArticlePage(card.link);
           if (detail.title) tituloFinal = toSentenceCaseHeadline(detail.title);
-          if (detail.volanta) volantaFinal = detail.volanta;
-          if (detail.description) bajadaFinal = detail.description;
-          if (detail.bodyHtml && detail.bodyHtml.length > 80) {
-            contenidoHtmlFinal = detail.bodyHtml;
+          if (detail.paragraphs && detail.paragraphs.length > 0) {
+            existingParagraphs = detail.paragraphs;
           }
           if (detail.imageUrl) imgFinal = detail.imageUrl;
         }
 
         const geo = clasificarGeografiaChaco(
-          `${tituloFinal} ${bajadaFinal}`,
+          `${tituloFinal} ${existingParagraphs.join(" ")}`,
           fuente.categoria_defecto
         );
 
+        const built = await buildComprehensiveArticle({
+          titulo: tituloFinal,
+          categoria: geo.categoria,
+          localidad: geo.localidad,
+          relatedHeadlines: card.relatedHeadlines,
+          existingParagraphs,
+        });
+
         const guardada = await saveNoticia({
           titulo: tituloFinal,
-          volanta: volantaFinal,
-          bajada: bajadaFinal,
-          contenido_html: contenidoHtmlFinal,
+          volanta: built.volanta,
+          bajada: built.bajada,
+          contenido_html: built.contenido_html,
           categoria_slug: geo.categoria,
           localidad: geo.localidad,
           imagen_url: toProxiedImageUrl(imgFinal),
-          imagen_caption: `${volantaFinal} — Fotografía original correspondiente a la noticia`,
-          autor: fuente.url.includes("letrap.com.ar")
-            ? "Letra P / Redacción ChacoHoy"
-            : "Redacción ChacoHoy",
+          imagen_caption: `${built.volanta} — ChacoHoy`,
+          autor: "Redacción ChacoHoy",
           estado: addedFromThisSource < 2 ? "publicado" : "borrador",
           destacada: addedFromThisSource === 0,
           es_ia: true,
-          fuente_nombre: fuente.nombre,
           fuente_url: card.link,
         });
 
@@ -744,12 +1025,12 @@ export async function POST(req: NextRequest) {
   await addLog({
     tipo: "scraper",
     estado: "exito",
-    mensaje: `Recopilador extrajo ${nuevas} noticias reales (Chaco.gob.ar, Letra P y Google News Topics) con sus fotografías exactas.`,
+    mensaje: `Recopilador procesó ${nuevas} noticias extensas con desarrollo completo de Redacción ChacoHoy.`,
   });
 
   return NextResponse.json({
     ok: true,
     nuevas,
-    message: `¡Recopilación completada! Se sumaron ${nuevas} noticias reales de Nacionales, Internacionales, Ciencia y Tecnología, Economía y Política con sus fotos originales.`,
+    message: `¡Se actualizaron ${nuevas} noticias con desarrollo periodístico extenso y sin menciones a fuentes externas!`,
   });
 }
